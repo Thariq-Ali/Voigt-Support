@@ -1,0 +1,423 @@
+{% extends "base.html" %}
+{% block title %}Support Console — OLGA{% endblock %}
+
+{% block body %}
+<a class="top-logout-fixed" href="{{ url_for('logout') }}" title="Logout">{{ current_user.id }} · Logout</a>
+<div class="overlay"></div>
+
+<!-- Logo and title between header and container -->
+<div class="brand-container">
+  <div class="logo" aria-hidden="true">
+    <img class="logo-img" src="{{ url_for('static', filename='logo.png') }}" alt="Logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='block'" />
+    <svg class="logo-svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+      <circle cx="7" cy="7" r="4"></circle>
+      <circle cx="17" cy="17" r="4"></circle>
+      <path d="M10.5 7h3M7 10.5v3M13.5 17H10" stroke="currentColor" stroke-width="2" fill="none"></path>
+    </svg>
+  </div>
+  <div class="brand-text">
+    <div class="title">OLGA Support AI Assistant</div>
+  </div>
+</div>
+
+<div class="widget-shell">
+  <div class="ai-card" role="dialog" aria-modal="true">
+    <!-- Header (left empty as brand is outside) -->
+    <div class="ai-header">
+      <div class="session-row">
+        <small id="sessionInfo" class="muted">Session: {{ session_id }}</small>
+      </div>
+    </div>
+
+    <!-- Thin progress bar -->
+    <div id="progress" class="progress" hidden></div>
+
+    <!-- FIRST VIEW: single large input (multiline) -->
+    <div id="firstView" class="first-view">
+      <textarea
+        id="firstInput"
+        class="prompt-input big"
+        placeholder="Ask your first question…"
+        autocomplete="off"
+        rows="1"
+      ></textarea>
+      <button id="firstSend" class="send-btn" aria-label="Send">▷</button>
+    </div>
+
+    <!-- AFTER FIRST ANSWER: answer + follow-up box -->
+    <div id="conversation" class="conversation" hidden>
+      <!-- Answers thread (we'll append more for follow-ups) -->
+      <div id="thread" class="thread"></div>
+
+      <!-- Follow-up input (multiline) -->
+      <div class="followup-row">
+        <textarea
+          id="followInput"
+          class="prompt-input"
+          placeholder="Ask a follow-up…"
+          autocomplete="off"
+          rows="1"
+        ></textarea>
+        <button id="followSend" class="send-btn" aria-label="Send">▷</button>
+      </div>
+    </div>
+    <div class="footer">
+      <span class="muted">Powered by <a href="https://www.linkedin.com/in/mohammed-thariq/" target="_blank" rel="noopener noreferrer"><strong>Chapters.ai</strong></a></span>
+      <button id="newSession" class="cta-new" hidden><span class="dot"></span> Ask new question</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const progressEl = document.getElementById('progress');
+
+const firstView   = document.getElementById('firstView');
+const firstInput  = document.getElementById('firstInput');
+const firstSend   = document.getElementById('firstSend');
+
+const convo       = document.getElementById('conversation');
+const threadEl    = document.getElementById('thread');
+const followInput = document.getElementById('followInput');
+const followSend  = document.getElementById('followSend');
+const newSessionBtn = document.getElementById('newSession');
+const sessionInfo = document.getElementById('sessionInfo');
+const sessionInfoInline = document.getElementById('sessionInfoInline');
+const followupRow = document.querySelector('.followup-row');
+
+// Enforce initial state on load (handles back/forward cache and refresh)
+document.addEventListener('DOMContentLoaded', () => {
+  // Dynamic padding to keep a clear gap between brand and widget
+  const brand = document.querySelector('.brand-container');
+  const root = document.documentElement;
+  function computeBrandOffset() {
+    if (!brand || !root) return;
+    const headerHeight = 0; // no site header; logout is fixed
+    const brandRect = brand.getBoundingClientRect();
+    const spacer = 24; // reduced gap between title and widget for horizontal layout
+    const offsetPx = Math.round(headerHeight + brandRect.height + spacer);
+    root.style.setProperty('--brand-offset', offsetPx + 'px');
+  }
+  computeBrandOffset();
+  // Recompute on resize to retain spacing on responsive changes
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(computeBrandOffset, 100);
+  });
+  if (firstView) firstView.hidden = false;
+  if (convo) convo.hidden = true;
+  if (firstInput) firstInput.value = '';
+  if (followInput) followInput.value = '';
+  // Initialize autoresize heights once DOM is ready
+  if (firstInput) autoResize(firstInput);
+  if (followInput) autoResize(followInput);
+  if (followupRow) followupRow.hidden = true;
+  if (newSessionBtn) newSessionBtn.hidden = true;
+});
+
+function setLoading(loading) {
+  progressEl.hidden = !loading;
+  [firstSend, followSend, firstInput, followInput].forEach(el => {
+    if (!el) return;
+    el.disabled = !!loading;
+  });
+  if (firstSend) firstSend.classList.toggle('loading', !!loading);
+  if (followSend) followSend.classList.toggle('loading', !!loading);
+}
+
+function addAnswerBlock(question, answerHtml) {
+  const block = document.createElement('div');
+  block.className = 'qa';
+  block.innerHTML = `
+    <div class="q">${escapeHtml(question)}</div>
+    <div class="a">${answerHtml}</div>
+  `;
+  threadEl.appendChild(block);
+  block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+}
+
+function escapeHtml(s) {
+  return (s ?? '').toString()
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function autoResize(textarea) {
+  textarea.style.height = 'auto';
+  textarea.style.height = (textarea.scrollHeight) + 'px';
+}
+
+// Very small, safe markdown renderer for bold, italics, code, headers, lists, links
+function renderMarkdownSafe(md) {
+  const text = (md || '').toString();
+  // Code blocks
+  let html = text.replace(/```([\s\S]*?)```/g, (m, p1) => {
+    return '<pre><code>' + escapeHtml(p1) + '</code></pre>';
+  });
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, (m, p1) => '<code>' + escapeHtml(p1) + '</code>');
+  // Headings (# to ######)
+  html = html.replace(/^######\s*(.*)$/gm, '<h6>$1</h6>')
+             .replace(/^#####\s*(.*)$/gm, '<h5>$1</h5>')
+             .replace(/^####\s*(.*)$/gm, '<h4>$1</h4>')
+             .replace(/^###\s*(.*)$/gm, '<h3>$1</h3>')
+             .replace(/^##\s*(.*)$/gm, '<h2>$1</h2>')
+             .replace(/^#\s*(.*)$/gm, '<h1>$1</h1>');
+  // Bold and italics
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+             .replace(/\*(.*?)\*/g, '<em>$1</em>');
+  // Links [text](url)
+  html = html.replace(/\[([^\]]+)\]\((https?:[^\)]+)\)/g, (m, text, url) => {
+    return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(text) + '</a>';
+  });
+  // Lists
+  html = html.replace(/^(?:- |\* )(.*)$/gm, '<li>$1</li>');
+  html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => '<ul>' + m + '</ul>');
+  // Paragraphs (simple)
+  html = html.split(/\n{2,}/).map(block => {
+    if (/^<h\d|<pre|<ul|<li|<p|<blockquote|<table/.test(block.trim())) return block;
+    return '<p>' + block.replace(/\n/g, '<br/>') + '</p>';
+  }).join('\n');
+  return html;
+}
+
+// Core call (supports streaming)
+async function ask(question, onToken) {
+  setLoading(true);
+  try {
+    const res = await fetch('{{ url_for("api_ask") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ question })
+    });
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const te = (res.headers.get('transfer-encoding') || '').toLowerCase();
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(errText || ('HTTP ' + res.status));
+    }
+
+    // Stream-first: handle SSE, NDJSON, chunked JSON, or plain text
+    if (res.body) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let done, value; // declare both to avoid ReferenceError
+      let acc = '', buffer = '', display = '';
+
+      function emitToken(piece) {
+        if (!piece) return;
+        display += piece;
+        if (onToken) onToken(piece);
+      }
+
+      function extractJsonObjects() {
+        const results = [];
+        let depth = 0;
+        let inStr = false;
+        let escapeNext = false;
+        let start = -1;
+        for (let i = 0; i < buffer.length; i++) {
+          const ch = buffer[i];
+          if (inStr) {
+            if (escapeNext) {
+              escapeNext = false;
+            } else if (ch === '\\') {
+              escapeNext = true;
+            } else if (ch === '"') {
+              inStr = false;
+            }
+            continue;
+          }
+          if (ch === '"') { inStr = true; continue; }
+          if (ch === '{') { if (depth === 0) start = i; depth++; }
+          else if (ch === '}') {
+            depth--;
+            if (depth === 0 && start !== -1) {
+              results.push(buffer.slice(start, i + 1));
+              start = -1;
+            }
+          }
+        }
+        if (results.length) {
+          const last = results[results.length - 1];
+          const idx = buffer.indexOf(last);
+          buffer = buffer.slice(idx + last.length);
+        }
+        return results;
+      }
+      while (true) {
+        ({ value, done } = await reader.read());
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        acc += chunk;
+        buffer += chunk;
+        // If Server-Sent Events, emit only `data:` lines
+        if (ct.includes('text/event-stream')) {
+          const lines = chunk.split(/\r?\n/);
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              const data = line.replace(/^data:\s?/, '');
+              emitToken(data);
+            }
+          }
+        } else if (ct.includes('application/x-ndjson')) {
+          // Emit complete JSON lines
+          const parts = buffer.split(/\r?\n/);
+          buffer = parts.pop() || '';
+          for (const line of parts) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const obj = JSON.parse(trimmed);
+              let piece = '';
+              if (typeof obj === 'string') piece = obj;
+              else if (obj && typeof obj.content === 'string') piece = obj.content;
+              else if (obj && typeof obj.token === 'string') piece = obj.token;
+              else if (obj && typeof obj.text === 'string') piece = obj.text;
+              emitToken(piece);
+            } catch (_) {
+              // If not valid JSON, just push raw line
+              emitToken(line);
+            }
+          }
+        } else if (ct.includes('application/json')) {
+          // Concatenated JSON objects without delimiters
+          const objs = extractJsonObjects();
+          for (const raw of objs) {
+            try {
+              const obj = JSON.parse(raw);
+              if (obj && obj.type === 'item') {
+                if (typeof obj.content === 'string') emitToken(obj.content);
+                else if (typeof obj.text === 'string') emitToken(obj.text);
+              }
+            } catch (_) {}
+          }
+        } else {
+          emitToken(chunk);
+        }
+      }
+      // Final render from accumulated text (Markdown-safe)
+      return renderMarkdownSafe(display || acc);
+    }
+
+    // No readable body: try JSON, else text
+    if (ct.includes('application/json')) {
+      const data = await res.json();
+      if (data.answer) return renderMarkdownSafe(data.answer);
+      if (typeof data.output === 'string') return renderMarkdownSafe(data.output);
+      return '<pre><code class="language-json">' + escapeHtml(JSON.stringify(data, null, 2)) + '</code></pre>';
+    }
+    return renderMarkdownSafe(await res.text());
+  } finally {
+    setLoading(false);
+  }
+}
+async function resetSession() {
+  setLoading(true);
+  try {
+    const res = await fetch('{{ url_for("api_new_session") }}', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'}
+    });
+    if (!res.ok) throw new Error('Failed to create new session');
+    const data = await res.json();
+    if (sessionInfo) sessionInfo.textContent = 'Session: ' + (data.session_id || '');
+    if (sessionInfoInline) sessionInfoInline.textContent = (data.session_id || '');
+    // Reset UI to initial state
+    threadEl.innerHTML = '';
+    if (firstView) firstView.hidden = false;
+    if (convo) convo.hidden = true;
+    if (followupRow) followupRow.hidden = true;
+    if (newSessionBtn) newSessionBtn.hidden = true;
+    if (firstInput) { firstInput.value = ''; firstInput.focus(); autoResize(firstInput); }
+    if (followInput) { followInput.value = ''; autoResize(followInput); }
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+// First submission
+async function submitFirst() {
+  const q = (firstInput.value || '').trim();
+  if (!q) { firstInput.focus(); return; }
+  if (firstSend) { firstSend.classList.add('loading'); firstSend.disabled = true; }
+  setLoading(true);
+  // Prepare UI and streaming target
+  if (firstView) firstView.hidden = true; // hide first question box immediately after submit
+  convo.hidden = false;
+  if (followupRow) followupRow.hidden = true;
+  const block = document.createElement('div');
+  block.className = 'qa';
+  block.innerHTML = `
+    <div class="q">${escapeHtml(q)}</div>
+    <div class="a"><span id="liveAnswer"><div class="loading-right"><button class="send-btn loading" aria-label="Loading" disabled></button></div></span></div>
+  `;
+  threadEl.appendChild(block);
+  const live = block.querySelector('#liveAnswer');
+  block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+
+  const tokens = [];
+  const html = await ask(q, (t) => {
+    tokens.push(t);
+    // Render minimal typing effect: update every chunk
+    live.innerHTML = renderMarkdownSafe(tokens.join(''));
+    block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  });
+  // Finalize content (ensures proper Markdown rendering)
+  live.innerHTML = html;
+  if (followupRow) followupRow.hidden = false;
+  if (newSessionBtn) newSessionBtn.hidden = false;
+  if (firstSend) { firstSend.classList.remove('loading'); firstSend.disabled = false; }
+  followInput.focus();
+}
+
+// Follow-up submission (appends to thread)
+async function submitFollow() {
+  const q = (followInput.value || '').trim();
+  if (!q) { followInput.focus(); return; }
+  if (followSend) { followSend.classList.add('loading'); followSend.disabled = true; }
+  setLoading(true);
+  if (followupRow) followupRow.hidden = true;
+  if (newSessionBtn) newSessionBtn.hidden = true;
+  const block = document.createElement('div');
+  block.className = 'qa';
+  block.innerHTML = `
+    <div class="q">${escapeHtml(q)}</div>
+    <div class="a"><span id="liveAnswer"><div class="loading-right"><button class="send-btn loading" aria-label="Loading" disabled></button></div></span></div>
+  `;
+  threadEl.appendChild(block);
+  const live = block.querySelector('#liveAnswer');
+  block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+
+  const tokens = [];
+  const html = await ask(q, (t) => {
+    tokens.push(t);
+    live.innerHTML = renderMarkdownSafe(tokens.join(''));
+    block.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  });
+  live.innerHTML = html;
+  followInput.value = '';
+  autoResize(followInput);
+  if (followupRow) followupRow.hidden = false;
+  if (newSessionBtn) newSessionBtn.hidden = false;
+  if (followSend) { followSend.classList.remove('loading'); followSend.disabled = false; }
+  followInput.focus();
+}
+
+firstSend.addEventListener('click', submitFirst);
+firstInput.addEventListener('input', () => autoResize(firstInput));
+firstInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitFirst(); }
+});
+
+followSend.addEventListener('click', submitFollow);
+followInput.addEventListener('input', () => autoResize(followInput));
+followInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitFollow(); }
+});
+
+if (newSessionBtn) {
+  newSessionBtn.addEventListener('click', resetSession);
+}
+</script>
+{% endblock %}
